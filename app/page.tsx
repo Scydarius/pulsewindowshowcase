@@ -42,6 +42,10 @@ function CameraDemo() {
   };
   useEffect(() => () => stop(), []);
   const start = async () => {
+    if (!navigator.mediaDevices?.getUserMedia) {
+      setStatus("This browser does not support camera access");
+      return;
+    }
     try {
       const stream = await navigator.mediaDevices.getUserMedia({ video: { facingMode: "user", width: { ideal: 640 }, height: { ideal: 480 } }, audio: false });
       streamRef.current = stream;
@@ -58,9 +62,20 @@ function CameraDemo() {
         frameRef.current = window.setTimeout(() => { frameRef.current = requestAnimationFrame(sample); }, 100) as unknown as number;
       };
       sample();
-    } catch { setStatus("Camera access was not allowed"); }
+    } catch (error) {
+      const errorName = error instanceof DOMException ? error.name : "";
+      if (errorName === "NotAllowedError") {
+        setStatus("Camera permission is blocked. Allow it in the address-bar camera settings, then try again");
+      } else if (errorName === "NotFoundError") {
+        setStatus("No available camera was found on this device");
+      } else if (errorName === "NotReadableError") {
+        setStatus("The camera is already being used by another app or browser tab");
+      } else {
+        setStatus("The camera could not start. Check browser camera permissions and try again");
+      }
+    }
   };
-  return <div className="camera-demo"><div className="camera-preview"><video ref={videoRef} muted playsInline /><div className="face-guide"><span></span><small>Keep your face here</small></div><canvas ref={canvasRef} className="hidden-canvas" /></div><div className="camera-demo-stats"><div><small>Pulse</small><strong>{bpm ?? "--"}</strong><em>BPM</em></div><div><small>Breathing</small><strong>{rr ?? "--"}</strong><em>breaths/min</em></div></div><div className="signal-chart camera-signal"><svg viewBox="0 0 560 100" role="img" aria-label="Live green-channel camera signal"><polyline points={(signal.length ? signal : Array.from({ length: 70 }, (_, index) => 45 + Math.sin(index / 2) * 3)).map((value, index, values) => `${index * (560 / Math.max(values.length - 1, 1))},${value}`).join(" ")} /></svg></div><div className="demo-status"><span className={running ? "status-dot active" : "status-dot"}></span>{status}{running && samplesRef.current.length < 60 ? " · calibrating" : ""}</div><button className="primary" onClick={running ? stop : start}>{running ? "Stop camera check" : "Start camera check"}</button><p className="camera-note">Your video stays in this browser. Results are experimental and not for diagnosis.</p></div>;
+  return <div className="camera-demo"><button type="button" className="primary camera-start" onClick={running ? stop : start}>{running ? "Stop camera check" : "Start camera check"}</button><div className="demo-status camera-status" aria-live="polite"><span className={running ? "status-dot active" : "status-dot"}></span>{status}{running && samplesRef.current.length < 60 ? " · calibrating" : ""}</div><div className="camera-preview"><video ref={videoRef} muted playsInline /><div className="face-guide"><span></span><small>Keep your face here</small></div><canvas ref={canvasRef} className="hidden-canvas" /></div><div className="camera-demo-stats"><div><small>Pulse</small><strong>{bpm ?? "--"}</strong><em>BPM</em></div><div><small>Breathing</small><strong>{rr ?? "--"}</strong><em>breaths/min</em></div></div><div className="signal-chart camera-signal"><svg viewBox="0 0 560 100" role="img" aria-label="Live green-channel camera signal"><polyline points={(signal.length ? signal : Array.from({ length: 70 }, (_, index) => 45 + Math.sin(index / 2) * 3)).map((value, index, values) => `${index * (560 / Math.max(values.length - 1, 1))},${value}`).join(" ")} /></svg></div><p className="camera-note">Your video stays in this browser. Results are experimental and not for diagnosis.</p></div>;
 }
 
 export default function Home() {
