@@ -1,9 +1,6 @@
-import vinext from "vinext";
 import { defineConfig } from "vite";
-import hostingConfig from "./.openai/hosting.json";
-import { cloudflare } from "@cloudflare/vite-plugin";
+import react from "@vitejs/plugin-react";
 
 export default defineConfig({
-  plugins: [vinext(), cloudflare({ viteEnvironment: { name: "rsc", childEnvironments: ["ssr"] }, config: { main: "./worker/index.ts", compatibility_flags: ["nodejs_compat"] } })],
-  server: { allowedHosts: [".trycloudflare.com", ".loca.lt"] },
+  plugins: [react()],
 });
