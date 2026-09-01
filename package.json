@@ -1,0 +1,9 @@
+{
+  "name": "pulsewindow-showcase",
+  "version": "1.0.0",
+  "private": true,
+  "type": "module",
+  "scripts": {"build": "vinext build", "dev": "vinext dev", "start": "vinext start"},
+  "dependencies": {"react": "19.2.6", "react-dom": "19.2.6"},
+  "devDependencies": {"@cloudflare/vite-plugin": "1.37.1", "@vitejs/plugin-react": "6.0.2", "@vitejs/plugin-rsc": "0.5.26", "vinext": "1.0.0-beta.2", "vite": "8.0.13", "wrangler": "4.92.0"}
+}
