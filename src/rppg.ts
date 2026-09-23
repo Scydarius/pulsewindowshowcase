@@ -1,41 +1,120 @@
 export type RGB = [number, number, number];
 export type Sample = { time: number; rgb: RGB };
-export type MotionSample = { time: number; value: number };
 export type Region = { x: number; y: number; width: number; height: number };
-export type PosePoint = { x: number; y: number; visibility?: number };
-export type Estimate = { bpm: number; quality: number; beatAge: number };
+export type LandmarkPoint = { x: number; y: number; z?: number; visibility?: number };
 
-export const INITIAL_CALIBRATION_SECONDS = 15;
-export const FINAL_MEASUREMENT_SECONDS = 60;
-const SIGNAL_WINDOW_SECONDS = 20;
-const MIN_BPM = 45;
-const MAX_BPM = 180;
-const MIN_QUALITY = 0.3;
-const MIN_REGION_QUALITY = 0.18;
-const MIN_COMBINED_QUALITY = 0.22;
-const REGION_AGREEMENT_BPM = 10;
-const MIN_RESPIRATION_RATE = 6;
-const MAX_RESPIRATION_RATE = 30;
-const MIN_RESPIRATION_QUALITY = 0.2;
+export type PulseWindowEstimate = {
+  bpm: number;
+  confidenceInterval: number;
+  snrDb: number;
+  quality: number;
+  state: "CALIBRATING" | "LOCKED" | "HOLDING";
+  waveform: number[];
+  roiWeights: number[];
+  respiratoryRate: number | null;
+  respiratoryQuality: number;
+};
+
+export const INITIAL_CALIBRATION_SECONDS = 5;
+export const FINAL_MEASUREMENT_SECONDS = 20;
+export const ANALYSIS_WINDOW_SECONDS = 8;
+
+const FPS = 30;
+const MIN_BPM = 48;
+const MAX_BPM = 150;
+const STEP_BPM = 0.25;
+const ROI_NAMES = ["Forehead", "Left cheek", "Right cheek"] as const;
+const ROI_LANDMARKS = [
+  [10, 338, 297, 332, 284, 251, 21, 54, 103, 67, 109],
+  [116, 123, 147, 213, 192, 138, 214, 120, 119, 118],
+  [345, 352, 376, 433, 416, 367, 434, 349, 348, 347],
+] as const;
+const MOTION_LANDMARKS = [1, 168, 33, 133, 263, 362] as const;
+
+function mean(values: number[]) {
+  return values.length ? values.reduce((sum, value) => sum + value, 0) / values.length : 0;
+}
 
 export function median(values: number[]) {
+  if (!values.length) return 0;
   const sorted = [...values].sort((a, b) => a - b);
-  return sorted[Math.floor(sorted.length / 2)];
+  const middle = Math.floor(sorted.length / 2);
+  return sorted.length % 2 ? sorted[middle] : (sorted[middle - 1] + sorted[middle]) / 2;
 }
 
 function standardDeviation(values: number[]) {
-  const mean = values.reduce((sum, value) => sum + value, 0) / values.length;
-  return Math.sqrt(values.reduce((sum, value) => sum + (value - mean) ** 2, 0) / values.length);
+  const average = mean(values);
+  return Math.sqrt(mean(values.map((value) => (value - average) ** 2)));
 }
 
-function interpolateSamples(samples: Sample[], fps = 30) {
-  const start = samples[0].time;
+function clamp(value: number, low: number, high: number) {
+  return Math.min(high, Math.max(low, value));
+}
+
+function normalise(values: number[]) {
+  const average = mean(values);
+  const scale = standardDeviation(values);
+  return values.map((value) => (value - average) / Math.max(scale, 1e-9));
+}
+
+function linearDetrend(values: number[]) {
+  if (values.length < 3) return values.map((value) => value - mean(values));
+  const centre = (values.length - 1) / 2;
+  const average = mean(values);
+  let numerator = 0;
+  let denominator = 0;
+  values.forEach((value, index) => {
+    const offset = index - centre;
+    numerator += offset * (value - average);
+    denominator += offset * offset;
+  });
+  const slope = numerator / Math.max(denominator, 1e-9);
+  return values.map((value, index) => value - average - slope * (index - centre));
+}
+
+function lowPass(values: number[], cutoffHz: number) {
+  if (!values.length) return [];
+  const dt = 1 / FPS;
+  const alpha = dt / (1 / (2 * Math.PI * cutoffHz) + dt);
+  const output = [values[0]];
+  for (let index = 1; index < values.length; index += 1) {
+    output.push(output[index - 1] + alpha * (values[index] - output[index - 1]));
+  }
+  return output;
+}
+
+function highPass(values: number[], cutoffHz: number) {
+  if (!values.length) return [];
+  const dt = 1 / FPS;
+  const rc = 1 / (2 * Math.PI * cutoffHz);
+  const alpha = rc / (rc + dt);
+  const output = [0];
+  for (let index = 1; index < values.length; index += 1) {
+    output.push(alpha * (output[index - 1] + values[index] - values[index - 1]));
+  }
+  return output;
+}
+
+function zeroPhase(values: number[], filter: (input: number[]) => number[]) {
+  return filter(filter(values).reverse()).reverse();
+}
+
+function bandpass(values: number[], lowHz: number, highHz: number, passes = 2) {
+  let output = linearDetrend(values);
+  for (let pass = 0; pass < passes; pass += 1) output = zeroPhase(output, (data) => highPass(data, lowHz));
+  for (let pass = 0; pass < passes; pass += 1) output = zeroPhase(output, (data) => lowPass(data, highHz));
+  return output;
+}
+
+function interpolateSamples(samples: Sample[], seconds: number) {
+  if (samples.length < 2) return [] as RGB[];
   const end = samples.at(-1)!.time;
-  const count = Math.floor((end - start) * fps);
+  const start = Math.max(samples[0].time, end - seconds);
+  const count = Math.floor((end - start) * FPS);
   const output: RGB[] = [];
-  let source = 0;
+  let source = Math.max(0, samples.findIndex((sample) => sample.time >= start) - 1);
   for (let index = 0; index < count; index += 1) {
-    const time = start + index / fps;
+    const time = start + index / FPS;
     while (source + 1 < samples.length && samples[source + 1].time < time) source += 1;
     if (source + 1 >= samples.length) break;
     const a = samples[source];
@@ -50,288 +129,286 @@ function interpolateSamples(samples: Sample[], fps = 30) {
   return output;
 }
 
-export function combineRegionSamples(regionSamples: Sample[][]) {
-  const count = Math.min(...regionSamples.map((samples) => samples.length));
-  if (!Number.isFinite(count) || count === 0) return [];
-  const starts = regionSamples.map((samples) => samples.length - count);
-  return Array.from({ length: count }, (_, index) => {
-    const samples = regionSamples.map((region, regionIndex) => region[starts[regionIndex] + index]);
-    return {
-      time: samples[0].time,
-      rgb: [0, 1, 2].map((channel) => median(samples.map((sample) => sample.rgb[channel]))) as RGB,
-    };
+/** Plane-Orthogonal-to-Skin projection used by the local PulseWindow engine. */
+function extractPOS(colours: RGB[]) {
+  if (colours.length < 2) return [];
+  const channelMeans = [0, 1, 2].map((channel) => mean(colours.map((colour) => colour[channel])));
+  const s1: number[] = [];
+  const s2: number[] = [];
+  colours.forEach((colour) => {
+    const red = colour[0] / Math.max(channelMeans[0], 1e-9);
+    const green = colour[1] / Math.max(channelMeans[1], 1e-9);
+    const blue = colour[2] / Math.max(channelMeans[2], 1e-9);
+    s1.push(green - blue);
+    s2.push(-2 * red + green + blue);
   });
+  const alpha = standardDeviation(s1) / Math.max(standardDeviation(s2), 1e-9);
+  const projected = s1.map((value, index) => value + alpha * s2[index]);
+  const average = mean(projected);
+  return projected.map((value) => value - average);
 }
 
-export function estimateBPM(samples: Sample[]): Estimate | null {
-  if (samples.length < 200 || samples.at(-1)!.time - samples[0].time < INITIAL_CALIBRATION_SECONDS - 0.5) return null;
-  const fps = 30;
-  const colours = interpolateSamples(samples, fps);
-  const windowSize = Math.round(1.6 * fps);
-  if (colours.length <= windowSize) return null;
-  const pulse = new Array(colours.length).fill(0);
-  const weights = new Array(colours.length).fill(0);
-  for (let start = 0; start <= colours.length - windowSize; start += 1) {
-    const segment = colours.slice(start, start + windowSize);
-    const means = [0, 1, 2].map((channel) => segment.reduce((sum, colour) => sum + colour[channel], 0) / windowSize);
-    const x: number[] = [];
-    const y: number[] = [];
-    segment.forEach((colour) => {
-      const red = colour[0] / means[0] - 1;
-      const green = colour[1] / means[1] - 1;
-      const blue = colour[2] / means[2] - 1;
-      x.push(green - blue);
-      y.push(green + blue - 2 * red);
-    });
-    const alpha = standardDeviation(x) / Math.max(standardDeviation(y), 1e-10);
-    const projected = x.map((value, index) => value + alpha * y[index]);
-    const mean = projected.reduce((sum, value) => sum + value, 0) / windowSize;
-    projected.forEach((value, offset) => {
-      pulse[start + offset] += value - mean;
-      weights[start + offset] += 1;
-    });
-  }
-  pulse.forEach((_, index) => { if (weights[index] > 0) pulse[index] /= weights[index]; });
-  const pulseMean = pulse.reduce((sum, value) => sum + value, 0) / pulse.length;
-  pulse.forEach((_, index) => (pulse[index] -= pulseMean));
-  const powers: Array<{ bpm: number; power: number; real: number; imaginary: number }> = [];
-  for (let bpm = MIN_BPM; bpm <= MAX_BPM; bpm += 0.5) {
+type SpectrumPoint = { bpm: number; power: number };
+
+function periodogram(signal: number[], lowBpm = MIN_BPM, highBpm = MAX_BPM, stepBpm = STEP_BPM) {
+  const centred = linearDetrend(signal);
+  const powers: SpectrumPoint[] = [];
+  for (let bpm = lowBpm; bpm <= highBpm + 1e-6; bpm += stepBpm) {
     const frequency = bpm / 60;
     let real = 0;
     let imaginary = 0;
-    pulse.forEach((value, index) => {
-      const angle = (2 * Math.PI * frequency * index) / fps;
-      const hann = 0.5 - 0.5 * Math.cos((2 * Math.PI * index) / Math.max(1, pulse.length - 1));
-      real += value * hann * Math.cos(angle);
-      imaginary -= value * hann * Math.sin(angle);
+    centred.forEach((value, index) => {
+      const window = 0.5 - 0.5 * Math.cos((2 * Math.PI * index) / Math.max(1, centred.length - 1));
+      const angle = (2 * Math.PI * frequency * index) / FPS;
+      real += value * window * Math.cos(angle);
+      imaginary -= value * window * Math.sin(angle);
     });
-    powers.push({ bpm, power: real ** 2 + imaginary ** 2, real, imaginary });
+    powers.push({ bpm, power: real * real + imaginary * imaginary });
   }
-  let peak = powers.reduce((best, item) => (item.power > best.power ? item : best));
-  if (peak.bpm >= 90) {
-    const half = powers.reduce((best, item) => Math.abs(item.bpm - peak.bpm / 2) < Math.abs(best.bpm - peak.bpm / 2) ? item : best);
-    if (half.power >= peak.power * 0.65) peak = half;
-  }
-  const total = powers.reduce((sum, item) => sum + item.power, 0);
-  const local = powers.filter((item) => Math.abs(item.bpm - peak.bpm) <= 9).reduce((sum, item) => sum + item.power, 0);
-  const angularFrequency = (2 * Math.PI * (peak.bpm / 60)) / fps;
-  const phase = Math.atan2(-peak.imaginary, peak.real);
-  const lastIndex = pulse.length - 1;
-  const completedCycles = Math.floor((angularFrequency * lastIndex + phase) / (2 * Math.PI));
-  const lastPeakIndex = (completedCycles * 2 * Math.PI - phase) / angularFrequency;
-  return { bpm: peak.bpm, quality: total > 0 ? local / total : 0, beatAge: Math.max(0, (lastIndex - lastPeakIndex) / fps) };
+  return powers;
 }
 
-function agreeAcrossRegions(estimates: Estimate[]) {
-  const pairs: [Estimate, Estimate][] = [];
-  for (let first = 0; first < estimates.length; first += 1) {
-    for (let second = first + 1; second < estimates.length; second += 1) {
-      if (Math.abs(estimates[first].bpm - estimates[second].bpm) <= REGION_AGREEMENT_BPM) pairs.push([estimates[first], estimates[second]]);
-    }
+function refinedPeak(points: SpectrumPoint[], index: number) {
+  if (index <= 0 || index >= points.length - 1) return points[index].bpm;
+  const y1 = Math.log(Math.max(points[index - 1].power, 1e-12));
+  const y2 = Math.log(Math.max(points[index].power, 1e-12));
+  const y3 = Math.log(Math.max(points[index + 1].power, 1e-12));
+  const denominator = y1 - 2 * y2 + y3;
+  const delta = Math.abs(denominator) > 1e-12 ? clamp(0.5 * (y1 - y3) / denominator, -0.5, 0.5) : 0;
+  return points[index].bpm + delta * (points[1]?.bpm - points[0]?.bpm || STEP_BPM);
+}
+
+function calculateSnr(points: SpectrumPoint[], pulseBpm: number) {
+  const total = points.reduce((sum, point) => sum + point.power, 0);
+  const signal = points
+    .filter((point) => Math.abs(point.bpm - pulseBpm) <= 9 || Math.abs(point.bpm - pulseBpm * 2) <= 9)
+    .reduce((sum, point) => sum + point.power, 0);
+  return clamp(10 * Math.log10(Math.max(signal, 1e-12) / Math.max(total - signal, 1e-12)), -20, 30);
+}
+
+function spectralEntropy(points: SpectrumPoint[]) {
+  const total = points.reduce((sum, point) => sum + point.power, 0);
+  if (total <= 1e-12) return 1;
+  const probabilities = points.map((point) => point.power / total).filter((value) => value > 0);
+  return -probabilities.reduce((sum, value) => sum + value * Math.log2(value), 0) / Math.log2(Math.max(points.length, 2));
+}
+
+function autocorrelationBpm(signal: number[]) {
+  const centred = linearDetrend(signal);
+  const energy = centred.reduce((sum, value) => sum + value * value, 0);
+  let bestLag = 0;
+  let best = -Infinity;
+  for (let lag = Math.floor(FPS / (MAX_BPM / 60)); lag <= Math.ceil(FPS / (MIN_BPM / 60)); lag += 1) {
+    let correlation = 0;
+    for (let index = lag; index < centred.length; index += 1) correlation += centred[index] * centred[index - lag];
+    correlation /= Math.max(energy, 1e-9);
+    if (correlation > best) { best = correlation; bestLag = lag; }
   }
-  let pair = pairs.sort((a, b) => b[0].quality + b[1].quality - a[0].quality - a[1].quality)[0];
-  if (!pair) {
-    const harmonicPairs: [Estimate, Estimate][] = [];
-    for (let first = 0; first < estimates.length; first += 1) {
-      for (let second = first + 1; second < estimates.length; second += 1) {
-        const lower = estimates[first].bpm <= estimates[second].bpm ? estimates[first] : estimates[second];
-        const higher = lower === estimates[first] ? estimates[second] : estimates[first];
-        if (higher.bpm >= 90 && Math.abs(higher.bpm / 2 - lower.bpm) <= REGION_AGREEMENT_BPM) harmonicPairs.push([lower, { ...higher, bpm: higher.bpm / 2, quality: higher.quality * 0.85 }]);
+  return bestLag > 0 && best >= 0.2 ? (FPS / bestLag) * 60 : null;
+}
+
+function analyseSpectrum(signal: number[]) {
+  const points = periodogram(signal);
+  let peakIndex = points.reduce((best, point, index) => point.power > points[best].power ? index : best, 0);
+  if (points[peakIndex].bpm / 2 >= MIN_BPM) {
+    const halfIndex = points.reduce((best, point, index) =>
+      Math.abs(point.bpm - points[peakIndex].bpm / 2) < Math.abs(points[best].bpm - points[peakIndex].bpm / 2) ? index : best, 0);
+    if (points[halfIndex].power >= points[peakIndex].power * 0.25) peakIndex = halfIndex;
+  }
+  const bpm = refinedPeak(points, peakIndex);
+  const snrDb = calculateSnr(points, bpm);
+  const entropy = spectralEntropy(points);
+  const autocorr = autocorrelationBpm(signal);
+  const periodicity = autocorr !== null && Math.abs(autocorr - bpm) > 15 ? 0.75 : 1;
+  const quality = clamp((1 / (1 + Math.exp(-0.4 * snrDb))) * (0.4 + 0.6 * (1 - entropy)) * periodicity, 0, 1);
+  return { bpm, snrDb, quality, points };
+}
+
+function respirationFromPulse(rawPulse: number[]) {
+  if (rawPulse.length < FPS * 14) return { rate: null, quality: 0 };
+  const filtered = bandpass(rawPulse, 0.12, 0.45, 1);
+  const points = periodogram(filtered, 7.2, 27, 0.25);
+  const peakIndex = points.reduce((best, point, index) => point.power > points[best].power ? index : best, 0);
+  const rate = refinedPeak(points, peakIndex);
+  const total = points.reduce((sum, point) => sum + point.power, 0);
+  const local = points.filter((point) => Math.abs(point.bpm - rate) <= 1.5).reduce((sum, point) => sum + point.power, 0);
+  const snrDb = 10 * Math.log10(Math.max(local, 1e-12) / Math.max(total - local, 1e-12));
+  const quality = clamp(1 / (1 + Math.exp(-0.45 * (snrDb - 1.5))), 0, 1);
+  return snrDb >= 1.5 ? { rate, quality } : { rate: null, quality };
+}
+
+export class PulseWindowEngine {
+  private lockedBpm: number | null = null;
+  private kalmanFrequency = 72 / 60;
+  private kalmanVariance = 0.04;
+  private kalmanInitialised = false;
+  private overrideCandidate: number | null = null;
+  private overrideCount = 0;
+  private roiWeights = [0.5, 0.25, 0.25];
+  private lastGood: PulseWindowEstimate | null = null;
+
+  reset() {
+    this.lockedBpm = null;
+    this.kalmanFrequency = 72 / 60;
+    this.kalmanVariance = 0.04;
+    this.kalmanInitialised = false;
+    this.overrideCandidate = null;
+    this.overrideCount = 0;
+    this.roiWeights = [0.5, 0.25, 0.25];
+    this.lastGood = null;
+  }
+
+  estimate(regionSamples: Sample[][], motionDetected: boolean): PulseWindowEstimate | null {
+    if (regionSamples.length !== 3 || regionSamples.some((samples) => samples.length < FPS * 3)) return null;
+    const availableSeconds = Math.min(...regionSamples.map((samples) => samples.at(-1)!.time - samples[0].time));
+    if (availableSeconds < 3.2) return null;
+    const colours = regionSamples.map((samples) => interpolateSamples(samples, Math.min(ANALYSIS_WINDOW_SECONDS, availableSeconds)));
+    const count = Math.min(...colours.map((samples) => samples.length));
+    if (count < FPS * 3) return null;
+
+    const raw = colours.map((values) => extractPOS(values.slice(-count)));
+    const filtered = raw.map((signal) => bandpass(signal, 0.8, 2.5));
+    const regionSpectra = filtered.map(analyseSpectrum);
+    const rawWeights = regionSpectra.map((result) => Math.max(0.05, result.snrDb + 5) ** 2);
+    const weightTotal = rawWeights.reduce((sum, value) => sum + value, 0);
+    const targets = rawWeights.map((value) => value / Math.max(weightTotal, 1e-9));
+    this.roiWeights = this.roiWeights.map((weight, index) => 0.85 * weight + 0.15 * targets[index]);
+    const smoothedTotal = this.roiWeights.reduce((sum, value) => sum + value, 0);
+    this.roiWeights = this.roiWeights.map((value) => value / smoothedTotal);
+
+    const normalised = filtered.map(normalise);
+    const fused = Array.from({ length: count }, (_, index) =>
+      normalised.reduce((sum, signal, regionIndex) => sum + this.roiWeights[regionIndex] * signal[index], 0));
+    const spectrum = analyseSpectrum(fused);
+    let candidateBpm = spectrum.bpm;
+
+    if (this.lockedBpm !== null && Math.abs(candidateBpm - this.lockedBpm) > 15) {
+      const locked = spectrum.points.reduce((best, point) =>
+        Math.abs(point.bpm - this.lockedBpm!) < Math.abs(best.bpm - this.lockedBpm!) ? point : best);
+      const candidate = spectrum.points.reduce((best, point) =>
+        Math.abs(point.bpm - candidateBpm) < Math.abs(best.bpm - candidateBpm) ? point : best);
+      if (locked.power >= candidate.power * 0.35) {
+        candidateBpm = this.lockedBpm;
+        this.overrideCount = 0;
+      } else {
+        if (this.overrideCandidate !== null && Math.abs(this.overrideCandidate - candidateBpm) <= 4) this.overrideCount += 1;
+        else { this.overrideCandidate = candidateBpm; this.overrideCount = 1; }
+        if (this.overrideCount < 3) candidateBpm = this.lockedBpm;
+      }
+    } else {
+      this.overrideCandidate = null;
+      this.overrideCount = 0;
+    }
+
+    const valid = spectrum.snrDb >= -2 && spectrum.quality >= 0.25;
+    if (!motionDetected && valid) this.lockedBpm = candidateBpm;
+    this.kalmanVariance = Math.min(0.2, this.kalmanVariance + 0.002);
+    if (!motionDetected && spectrum.snrDb >= -2.5) {
+      const measured = clamp(candidateBpm / 60, MIN_BPM / 60, MAX_BPM / 60);
+      if (!this.kalmanInitialised && spectrum.snrDb >= -0.5) {
+        this.kalmanFrequency = measured;
+        this.kalmanVariance = 0.03;
+        this.kalmanInitialised = true;
+      } else if (this.kalmanInitialised) {
+        let measurementVariance = 0.01 * (1 + 6 * Math.exp(-0.35 * clamp(spectrum.snrDb, -3, 14)));
+        if (Math.abs(measured - this.kalmanFrequency) > 0.33) measurementVariance *= 50;
+        const gain = this.kalmanVariance / (this.kalmanVariance + measurementVariance);
+        this.kalmanFrequency = clamp(this.kalmanFrequency + gain * (measured - this.kalmanFrequency), MIN_BPM / 60, MAX_BPM / 60);
+        this.kalmanVariance *= 1 - gain;
       }
     }
-    pair = harmonicPairs.sort((a, b) => b[0].quality + b[1].quality - a[0].quality - a[1].quality)[0];
+
+    const respiratoryColours = regionSamples.map((samples) => interpolateSamples(samples, Math.min(20, availableSeconds)));
+    const respiratoryCount = Math.min(...respiratoryColours.map((samples) => samples.length));
+    const respiratorySignals = respiratoryColours.map((values) => normalise(extractPOS(values.slice(-respiratoryCount))));
+    const respiratoryRaw = Array.from({ length: respiratoryCount }, (_, index) =>
+      respiratorySignals.reduce((sum, signal, regionIndex) => sum + this.roiWeights[regionIndex] * signal[index], 0));
+    const respiration = respirationFromPulse(respiratoryRaw);
+
+    const result: PulseWindowEstimate = {
+      bpm: this.kalmanInitialised ? this.kalmanFrequency * 60 : candidateBpm,
+      confidenceInterval: valid ? clamp(1.2 + 6 * Math.exp(-0.35 * Math.max(0, spectrum.snrDb)), 0.8, 5) : 8,
+      snrDb: spectrum.snrDb,
+      quality: spectrum.quality,
+      state: motionDetected ? "HOLDING" : valid && this.kalmanInitialised ? "LOCKED" : "CALIBRATING",
+      waveform: fused.slice(-180),
+      roiWeights: [...this.roiWeights],
+      respiratoryRate: respiration.rate,
+      respiratoryQuality: respiration.quality,
+    };
+    if (result.state === "LOCKED") this.lastGood = result;
+    return motionDetected && this.lastGood ? { ...this.lastGood, state: "HOLDING" } : result;
   }
-  if (!pair) return null;
-  const weights = pair.map((estimate) => estimate.quality ** 2);
-  const strongest = pair[0].quality >= pair[1].quality ? pair[0] : pair[1];
-  return {
-    bpm: (pair[0].bpm * weights[0] + pair[1].bpm * weights[1]) / (weights[0] + weights[1]),
-    quality: (pair[0].quality + pair[1].quality) / 2,
-    beatAge: strongest.beatAge,
-  };
 }
 
-export function estimateLiveBPM(regionSamples: Sample[][]) {
-  const regional = regionSamples.map(estimateBPM).filter((estimate): estimate is Estimate => estimate !== null && estimate.quality >= MIN_REGION_QUALITY);
-  let estimate = agreeAcrossRegions(regional);
-  if (estimate && estimate.quality < MIN_QUALITY) estimate = null;
-  if (!estimate) {
-    const combined = estimateBPM(combineRegionSamples(regionSamples));
-    if (combined && combined.quality >= MIN_COMBINED_QUALITY) estimate = combined;
-  }
-  if (!estimate) {
-    const strongest = [...regional].sort((a, b) => b.quality - a.quality)[0];
-    if (strongest?.quality >= 0.34) estimate = strongest;
-  }
-  return estimate;
+function polygonBounds(points: Array<{ x: number; y: number }>): Region {
+  const xs = points.map((point) => point.x);
+  const ys = points.map((point) => point.y);
+  const x = Math.min(...xs);
+  const y = Math.min(...ys);
+  return { x, y, width: Math.max(...xs) - x, height: Math.max(...ys) - y };
 }
 
-export function estimateFinalBPM(regionSamples: Sample[][]) {
-  const first = Math.max(...regionSamples.map((samples) => samples[0]?.time ?? Infinity));
-  const last = Math.min(...regionSamples.map((samples) => samples.at(-1)?.time ?? -Infinity));
-  if (!Number.isFinite(first) || !Number.isFinite(last) || last - first < 45) return null;
-  const estimates: Estimate[] = [];
-  for (let start = first; start + SIGNAL_WINDOW_SECONDS <= last + 0.25; start += 10) {
-    const regions = regionSamples.map((samples) => samples.filter((sample) => sample.time >= start && sample.time <= start + SIGNAL_WINDOW_SECONDS));
-    let estimate = agreeAcrossRegions(regions.map(estimateBPM).filter((item): item is Estimate => item !== null && item.quality >= MIN_REGION_QUALITY));
-    if (!estimate) {
-      const combined = estimateBPM(combineRegionSamples(regions));
-      if (combined && combined.quality >= MIN_COMBINED_QUALITY) estimate = combined;
+function pointInPolygon(x: number, y: number, polygon: Array<{ x: number; y: number }>) {
+  let inside = false;
+  for (let first = 0, second = polygon.length - 1; first < polygon.length; second = first++) {
+    const a = polygon[first];
+    const b = polygon[second];
+    const intersects = (a.y > y) !== (b.y > y) && x < ((b.x - a.x) * (y - a.y)) / (b.y - a.y || 1e-9) + a.x;
+    if (intersects) inside = !inside;
+  }
+  return inside;
+}
+
+function percentile(values: number[], fraction: number) {
+  if (!values.length) return 0;
+  const sorted = [...values].sort((a, b) => a - b);
+  return sorted[Math.floor(clamp(fraction, 0, 1) * (sorted.length - 1))];
+}
+
+export function meshRegions(landmarks: LandmarkPoint[], width: number, height: number) {
+  return ROI_LANDMARKS.map((indices) =>
+    polygonBounds(indices.map((index) => ({ x: landmarks[index].x * width, y: landmarks[index].y * height }))));
+}
+
+/** Anatomical ROIs with the local engine's shadow, highlight and trimmed-mean rejection. */
+export function sampleMeshRegions(context: CanvasRenderingContext2D, landmarks: LandmarkPoint[]) {
+  const width = context.canvas.width;
+  const height = context.canvas.height;
+  const image = context.getImageData(0, 0, width, height).data;
+  const polygons = ROI_LANDMARKS.map((indices) =>
+    indices.map((index) => ({ x: landmarks[index].x * width, y: landmarks[index].y * height })));
+  const colours = polygons.map((polygon) => {
+    const bounds = polygonBounds(polygon);
+    const pixels: Array<{ r: number; g: number; b: number; luminance: number }> = [];
+    for (let y = Math.max(0, Math.floor(bounds.y)); y <= Math.min(height - 1, Math.ceil(bounds.y + bounds.height)); y += 1) {
+      for (let x = Math.max(0, Math.floor(bounds.x)); x <= Math.min(width - 1, Math.ceil(bounds.x + bounds.width)); x += 1) {
+        if (!pointInPolygon(x + 0.5, y + 0.5, polygon)) continue;
+        const offset = (y * width + x) * 4;
+        const r = image[offset], g = image[offset + 1], b = image[offset + 2];
+        const luminance = 0.299 * r + 0.587 * g + 0.114 * b;
+        if (r < 245 && g < 245 && b < 245 && luminance > 20) pixels.push({ r, g, b, luminance });
+      }
     }
-    if (estimate && estimate.quality >= MIN_QUALITY) estimates.push(estimate);
-  }
-  if (estimates.length < 3) return null;
-  const centre = median(estimates.map((estimate) => estimate.bpm));
-  const inliers = estimates.filter((estimate) => Math.abs(estimate.bpm - centre) <= 6);
-  if (inliers.length < 3) return null;
-  const rates = inliers.map((estimate) => estimate.bpm);
-  if (Math.max(...rates) - Math.min(...rates) > 8) return null;
-  const meanQuality = inliers.reduce((sum, estimate) => sum + estimate.quality, 0) / inliers.length;
-  const consistency = Math.max(0, 1 - (Math.max(...rates) - Math.min(...rates)) / 12);
-  const quality = meanQuality * (0.65 + 0.35 * consistency);
-  if (quality < MIN_QUALITY) return null;
-  return { bpm: median(rates), quality, beatAge: inliers.at(-1)!.beatAge };
-}
-
-function estimateRespiratoryRate(samples: MotionSample[]) {
-  if (samples.length < 120 || samples.at(-1)!.time - samples[0].time < 25) return null;
-  const fps = 10;
-  const first = samples[0];
-  const last = samples.at(-1)!;
-  const count = Math.floor((last.time - first.time) * fps);
-  const values: number[] = [];
-  let source = 0;
-  for (let index = 0; index < count; index += 1) {
-    const time = first.time + index / fps;
-    while (source + 1 < samples.length && samples[source + 1].time < time) source += 1;
-    if (source + 1 >= samples.length) break;
-    const a = samples[source];
-    const b = samples[source + 1];
-    values.push(a.value + (b.value - a.value) * ((time - a.time) / Math.max(b.time - a.time, 1e-6)));
-  }
-  if (values.length < 250) return null;
-  const meanIndex = (values.length - 1) / 2;
-  const meanValue = values.reduce((sum, value) => sum + value, 0) / values.length;
-  let squaredOffsets = 0;
-  let offsetDeviation = 0;
-  values.forEach((value, index) => {
-    const offset = index - meanIndex;
-    squaredOffsets += offset * offset;
-    offsetDeviation += offset * (value - meanValue);
+    if (pixels.length < 40) return null;
+    const luminances = pixels.map((pixel) => pixel.luminance);
+    const low = percentile(luminances, 0.1);
+    const high = percentile(luminances, 0.9);
+    const trimmed = pixels.filter((pixel) => pixel.luminance >= low && pixel.luminance <= high);
+    const selected = trimmed.length >= 40 ? trimmed : pixels;
+    return [mean(selected.map((pixel) => pixel.r)), mean(selected.map((pixel) => pixel.g)), mean(selected.map((pixel) => pixel.b))] as RGB;
   });
-  const slope = squaredOffsets > 0 ? offsetDeviation / squaredOffsets : 0;
-  const detrended = values.map((value, index) => value - meanValue - slope * (index - meanIndex));
-  const powers: Array<{ rate: number; power: number }> = [];
-  for (let rate = MIN_RESPIRATION_RATE; rate <= MAX_RESPIRATION_RATE; rate += 0.5) {
-    let real = 0;
-    let imaginary = 0;
-    detrended.forEach((value, index) => {
-      const angle = (2 * Math.PI * (rate / 60) * index) / fps;
-      const hann = 0.5 - 0.5 * Math.cos((2 * Math.PI * index) / Math.max(1, detrended.length - 1));
-      real += value * hann * Math.cos(angle);
-      imaginary -= value * hann * Math.sin(angle);
-    });
-    powers.push({ rate, power: real ** 2 + imaginary ** 2 });
-  }
-  const peak = powers.reduce((best, item) => item.power > best.power ? item : best);
-  const total = powers.reduce((sum, item) => sum + item.power, 0);
-  const local = powers.filter((item) => Math.abs(item.rate - peak.rate) <= 2).reduce((sum, item) => sum + item.power, 0);
-  return { rate: peak.rate, quality: total > 0 ? local / total : 0 };
+  if (colours.some((colour) => colour === null)) return null;
+  return { colours: colours as RGB[], regions: polygons.map(polygonBounds), names: ROI_NAMES };
 }
 
-function respiratoryConsensus(estimates: Array<{ rate: number; quality: number }>) {
-  const pairs: Array<[{ rate: number; quality: number }, { rate: number; quality: number }]> = [];
-  for (let first = 0; first < estimates.length; first += 1) for (let second = first + 1; second < estimates.length; second += 1) if (Math.abs(estimates[first].rate - estimates[second].rate) <= 3) pairs.push([estimates[first], estimates[second]]);
-  const pair = pairs.sort((a, b) => b[0].quality + b[1].quality - a[0].quality - a[1].quality)[0];
-  if (!pair) return null;
-  const quality = (pair[0].quality + pair[1].quality) / 2;
-  const rate = (pair[0].rate * pair[0].quality + pair[1].rate * pair[1].quality) / Math.max(pair[0].quality + pair[1].quality, 1e-6);
-  return { rate, quality };
-}
-
-export function estimateFinalRespiratoryRate(regionSamples: MotionSample[][]) {
-  const first = Math.max(...regionSamples.map((samples) => samples[0]?.time ?? Infinity));
-  const last = Math.min(...regionSamples.map((samples) => samples.at(-1)?.time ?? -Infinity));
-  if (!Number.isFinite(first) || !Number.isFinite(last) || last - first < 42) return null;
-  const estimates: Array<{ rate: number; quality: number }> = [];
-  for (let start = first; start + 25 <= last + 0.25; start += 8) {
-    const regional = regionSamples.map((samples) => estimateRespiratoryRate(samples.filter((sample) => sample.time >= start && sample.time <= start + 25))).filter((estimate): estimate is { rate: number; quality: number } => estimate !== null && estimate.quality >= 0.14);
-    const agreed = respiratoryConsensus(regional);
-    if (agreed && agreed.quality >= MIN_RESPIRATION_QUALITY) estimates.push(agreed);
-  }
-  if (estimates.length < 3) return null;
-  const centre = median(estimates.map((estimate) => estimate.rate));
-  const inliers = estimates.filter((estimate) => Math.abs(estimate.rate - centre) <= 3);
-  if (inliers.length < 3) return null;
-  const rates = inliers.map((estimate) => estimate.rate);
-  if (Math.max(...rates) - Math.min(...rates) > 4) return null;
-  return { rate: median(rates), quality: inliers.reduce((sum, estimate) => sum + estimate.quality, 0) / inliers.length };
-}
-
-export function chestRegionsFromPose(landmarks: PosePoint[], width: number, height: number): Region[] | null {
-  const left = landmarks[11];
-  const right = landmarks[12];
-  if (!left || !right || (left.visibility ?? 1) < 0.55 || (right.visibility ?? 1) < 0.55) return null;
-  const leftX = left.x * width;
-  const rightX = right.x * width;
-  const shoulderY = ((left.y + right.y) / 2) * height;
-  const span = Math.abs(rightX - leftX);
-  if (span < width * 0.16 || shoulderY > height * 0.72) return null;
-  const minX = Math.min(leftX, rightX);
-  const regionHeight = Math.min(span * 0.42, height - shoulderY - 2);
-  if (regionHeight < height * 0.08) return null;
-  return [
-    { x: minX + span * 0.18, y: shoulderY + span * 0.06, width: span * 0.64, height: regionHeight },
-    { x: minX - span * 0.04, y: shoulderY + span * 0.03, width: span * 0.38, height: regionHeight * 0.72 },
-    { x: minX + span * 0.66, y: shoulderY + span * 0.03, width: span * 0.38, height: regionHeight * 0.72 },
-  ].map((region) => ({ x: Math.max(0, region.x), y: Math.max(0, region.y), width: Math.min(width - Math.max(0, region.x), region.width), height: Math.min(height - Math.max(0, region.y), region.height) }));
-}
-
-export function faceRegions(face: Region) {
-  return [
-    { x: face.x + face.width * 0.25, y: face.y + face.height * 0.1, width: face.width * 0.5, height: face.height * 0.18 },
-    { x: face.x + face.width * 0.12, y: face.y + face.height * 0.48, width: face.width * 0.25, height: face.height * 0.18 },
-    { x: face.x + face.width * 0.63, y: face.y + face.height * 0.48, width: face.width * 0.25, height: face.height * 0.18 },
-  ];
-}
-
-export function sampleRegions(context: CanvasRenderingContext2D, face: Region) {
-  return faceRegions(face).map((region) => {
-    const x = Math.max(0, Math.floor(region.x));
-    const y = Math.max(0, Math.floor(region.y));
-    const width = Math.max(1, Math.min(context.canvas.width - x, Math.floor(region.width)));
-    const height = Math.max(1, Math.min(context.canvas.height - y, Math.floor(region.height)));
-    const image = context.getImageData(x, y, width, height).data;
-    let red = 0, green = 0, blue = 0, pixels = 0;
-    for (let index = 0; index < image.length; index += 16) {
-      red += image[index]; green += image[index + 1]; blue += image[index + 2]; pixels += 1;
-    }
-    return [red / pixels, green / pixels, blue / pixels] as RGB;
-  });
-}
-
-const MOTION_GRID_SIZE = 20;
-export function motionGrid(context: CanvasRenderingContext2D, region: Region) {
-  const image = context.getImageData(Math.floor(region.x), Math.floor(region.y), Math.max(1, Math.floor(region.width)), Math.max(1, Math.floor(region.height)));
-  const values: number[] = [];
-  for (let gridY = 0; gridY < MOTION_GRID_SIZE; gridY += 1) for (let gridX = 0; gridX < MOTION_GRID_SIZE; gridX += 1) {
-    const x = Math.min(image.width - 1, Math.floor((gridX + 0.5) * image.width / MOTION_GRID_SIZE));
-    const y = Math.min(image.height - 1, Math.floor((gridY + 0.5) * image.height / MOTION_GRID_SIZE));
-    const offset = (y * image.width + x) * 4;
-    values.push(0.299 * image.data[offset] + 0.587 * image.data[offset + 1] + 0.114 * image.data[offset + 2]);
-  }
-  return values;
-}
-
-export function verticalMotion(previous: number[], current: number[]) {
-  if (previous.length !== current.length) return null;
-  let numerator = 0, denominator = 0;
-  for (let y = 1; y < MOTION_GRID_SIZE - 1; y += 1) for (let x = 1; x < MOTION_GRID_SIZE - 1; x += 1) {
-    const index = y * MOTION_GRID_SIZE + x;
-    const gradient = (current[index + MOTION_GRID_SIZE] - current[index - MOTION_GRID_SIZE]) / 2;
-    numerator += gradient * (current[index] - previous[index]);
-    denominator += gradient * gradient;
-  }
-  if (denominator < 700) return null;
-  return Math.max(-1.5, Math.min(1.5, -numerator / denominator));
+export function assessLandmarkMotion(current: LandmarkPoint[], previous: LandmarkPoint[] | null, dt: number) {
+  if (!previous || current.length < 468 || previous.length < 468) return { moving: false, velocity: 0 };
+  const iod = Math.max(20, Math.hypot((current[33].x - current[263].x) * 320, (current[33].y - current[263].y) * 240));
+  const displacement = mean(MOTION_LANDMARKS.map((index) => Math.hypot(
+    (current[index].x - previous[index].x) * 320,
+    (current[index].y - previous[index].y) * 240,
+  )));
+  const velocity = displacement / Math.max(dt, 1e-4) / iod;
+  return { moving: velocity > 0.85, velocity };
 }
