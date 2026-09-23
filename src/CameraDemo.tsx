@@ -65,7 +65,7 @@ export default function CameraDemo() {
   const respiratoryCompleteRef = useRef(false);
   const [running, setRunning] = useState(false);
   const [status, setStatus] = useState("Camera is off");
-  const [breathingStatus, setBreathingStatus] = useState("A confirmed breathing estimate needs a full 60-second recording");
+  const [breathingStatus, setBreathingStatus] = useState("Respiratory rate is experimental and needs a full 60-second recording");
   const [bpm, setBpm] = useState<number | null>(null);
   const [rr, setRr] = useState<number | null>(null);
   const [signal, setSignal] = useState<number[]>([]);
@@ -94,7 +94,7 @@ export default function CameraDemo() {
     setRr(null);
     setSignal([]);
     setProgress(0);
-    setBreathingStatus("A confirmed breathing estimate needs a full 60-second recording");
+    setBreathingStatus("Respiratory rate is experimental and needs a full 60-second recording");
   }, []);
 
   const stop = useCallback(() => {
@@ -285,7 +285,7 @@ export default function CameraDemo() {
     }
     try {
       resetMeasurement();
-      setStatus("Loading the original face and shoulder trackers");
+      setStatus("Loading face and shoulder tracking");
       const stream = await navigator.mediaDevices.getUserMedia({ video: { facingMode: "user", width: { ideal: 640 }, height: { ideal: 480 }, frameRate: { ideal: 30 } }, audio: false });
       streamRef.current = stream;
       if (!videoRef.current) return;
@@ -305,8 +305,10 @@ export default function CameraDemo() {
 
   const chartSignal = signal.length ? signal : Array.from({ length: 70 }, (_, index) => 50 + Math.sin(index / 2) * 2);
   return <div className="camera-demo">
-    <button type="button" className="primary camera-start" onClick={running ? stop : start}>{running ? "Stop camera check" : "Start 60-second camera check"}</button>
-    <div className="demo-status camera-status" aria-live="polite"><span className={running ? "status-dot active" : "status-dot"}></span>{status}</div>
+    <div className="camera-toolbar">
+      <button type="button" className="button primary camera-start" onClick={running ? stop : start}>{running ? "Stop camera check" : "Start 60-second camera check"}</button>
+      <div className="demo-status camera-status" aria-live="polite"><span className={running ? "status-dot active" : "status-dot"}></span>{status}</div>
+    </div>
     <div className="measurement-progress"><span style={{ width: `${(progress / FINAL_MEASUREMENT_SECONDS) * 100}%` }}></span></div>
     <small className="progress-label">{running ? `${progress} of ${FINAL_MEASUREMENT_SECONDS} seconds` : "15-second calibration · 60 seconds for a confirmed result"}</small>
     <div className="camera-preview">
@@ -317,9 +319,9 @@ export default function CameraDemo() {
       {chestRegions.map((region, index) => <div className="tracked-chest" key={index} style={overlayStyle(region)} />)}
       <canvas ref={canvasRef} width={CANVAS_WIDTH} height={CANVAS_HEIGHT} className="hidden-canvas" />
     </div>
-    <div className="camera-demo-stats"><div><small>Pulse</small><strong>{bpm === null ? "--" : Math.round(bpm)}</strong><em>BPM</em></div><div><small>Breathing</small><strong>{rr === null ? "--" : Math.round(rr)}</strong><em>breaths/min</em></div></div>
+    <div className="camera-demo-stats"><div><small>Heart rate</small><strong>{bpm === null ? "--" : Math.round(bpm)}</strong><em>BPM</em></div><div><small>Respiratory rate <span>experimental</span></small><strong>{rr === null ? "--" : Math.round(rr)}</strong><em>breaths/min</em></div></div>
     <p className="breathing-status" aria-live="polite">{breathingStatus}</p>
-    <div className="signal-chart camera-signal"><svg viewBox="0 0 560 100" role="img" aria-label="Live green-channel camera signal"><polyline points={chartSignal.map((value, index) => `${index * (560 / Math.max(chartSignal.length - 1, 1))},${value}`).join(" ")} /></svg></div>
-    <p className="camera-note">Original multi-region PulseWindow processing. Your video stays in this browser. Results remain experimental and are not for diagnosis.</p>
+    <div className="signal-chart camera-signal"><svg viewBox="0 0 560 100" role="img" aria-label="Live RGB-derived camera pulse signal"><polyline points={chartSignal.map((value, index) => `${index * (560 / Math.max(chartSignal.length - 1, 1))},${value}`).join(" ")} /></svg></div>
+    <p className="camera-note">Simplified browser demonstration. Camera frames are processed locally and are not uploaded or stored. Results are experimental and not for diagnosis.</p>
   </div>;
 }
