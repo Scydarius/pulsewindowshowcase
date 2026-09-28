@@ -67,11 +67,11 @@ export default function Home() {
     </section>
 
     <section className="status-section">
-      <div><p className="eyebrow">CURRENT STATUS</p><h2>A working signal engine, moving toward telehealth.</h2><p>Our POS rPPG engine streams live telemetry to the showcase through short-lived sessions, with facial tracking, motion awareness and signal-quality telemetry.</p></div>
+      <div><p className="eyebrow">CURRENT STATUS</p><h2>A working signal engine, moving toward telehealth.</h2><p>Our FUSION rPPG engine streams live telemetry to the showcase through short-lived sessions, with facial tracking, motion awareness and signal-quality telemetry.</p></div>
       <div className="status-lists"><div><strong><i className="ready"></i>Working now</strong><ul><li>Contactless heart-rate estimation</li><li>Multi-region facial tracking</li><li>Motion and signal-quality checks</li><li>Desktop signal engine</li></ul></div><div><strong><i></i>In development</strong><ul><li>Integrated telehealth calls</li><li>New browser and iPhone engine</li><li>Clinician-controlled checks</li><li>Respiratory-rate refinement</li></ul></div></div>
     </section>
 
-    <section className="final-cta"><p className="eyebrow">SEE THE IDEA IN ACTION</p><h2>Try the live signal engine.</h2><p>The demo opens a short-lived session to PulseWindow's POS rPPG service and displays live waveform and signal-quality telemetry.</p><div className="button-row centered"><a className="button primary" href="/demo">Open camera demo <span>→</span></a><a className="button secondary" href="/contact">Talk to the team</a></div></section>
+    <section className="final-cta"><p className="eyebrow">SEE THE IDEA IN ACTION</p><h2>Try the live signal engine.</h2><p>The demo opens a short-lived session to PulseWindow's FUSION rPPG service and displays live waveform and signal-quality telemetry.</p><div className="button-row centered"><a className="button primary" href="/demo">Open camera demo <span>→</span></a><a className="button secondary" href="/contact">Talk to the team</a></div></section>
     <SiteFooter />
   </main>;
 }

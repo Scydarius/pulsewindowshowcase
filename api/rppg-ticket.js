@@ -12,5 +12,5 @@ export default function handler(request, response) {
   const signature = createHmac("sha256", secret).update(encodedPayload).digest("base64url");
   const ticket = `${encodedPayload}.${signature}`;
   const websocketBase = apiUrl.replace(/^https:/, "wss:").replace(/^http:/, "ws:").replace(/\/$/, "");
-  return response.status(200).json({ websocketUrl: `${websocketBase}/api/v1/stream?session_id=${encodeURIComponent(sessionId)}&ticket=${encodeURIComponent(ticket)}&algorithm=POS&fps=15` });
+  return response.status(200).json({ websocketUrl: `${websocketBase}/api/v1/stream?session_id=${encodeURIComponent(sessionId)}&ticket=${encodeURIComponent(ticket)}&algorithm=FUSION&fps=15` });
 }
