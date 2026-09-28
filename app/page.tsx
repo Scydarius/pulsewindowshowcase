@@ -67,11 +67,11 @@ export default function Home() {
     </section>
 
     <section className="status-section">
-      <div><p className="eyebrow">CURRENT STATUS</p><h2>A working research engine, moving toward telehealth.</h2><p>Our newer multi-region engine now runs both as a local research program and as a browser prototype, with dense facial tracking, motion checks and signal-quality filtering.</p></div>
+      <div><p className="eyebrow">CURRENT STATUS</p><h2>A working research engine, moving toward telehealth.</h2><p>Our FUSION research engine now streams live rPPG telemetry to the showcase through short-lived sessions, with facial tracking, motion awareness and signal-quality telemetry.</p></div>
       <div className="status-lists"><div><strong><i className="ready"></i>Working now</strong><ul><li>Contactless heart-rate estimation</li><li>Multi-region facial tracking</li><li>Motion and signal-quality checks</li><li>Desktop research engine</li></ul></div><div><strong><i></i>In development</strong><ul><li>Integrated telehealth calls</li><li>New browser and iPhone engine</li><li>Clinician-controlled checks</li><li>Experimental respiratory rate</li></ul></div></div>
     </section>
 
-    <section className="final-cta"><p className="eyebrow">SEE THE IDEA IN ACTION</p><h2>Try the new engine in your browser.</h2><p>The demo now uses a web port of PulseWindow's newer multi-region research pipeline, with the same core POS signal extraction and quality controls.</p><div className="button-row centered"><a className="button primary" href="/demo">Open camera demo <span>→</span></a><a className="button secondary" href="/contact">Talk to the team</a></div></section>
+    <section className="final-cta"><p className="eyebrow">SEE THE IDEA IN ACTION</p><h2>Try the live research engine.</h2><p>The demo opens a short-lived session to PulseWindow's FUSION rPPG service and displays live waveform, signal quality and experimental estimates.</p><div className="button-row centered"><a className="button primary" href="/demo">Open camera demo <span>→</span></a><a className="button secondary" href="/contact">Talk to the team</a></div></section>
     <SiteFooter />
   </main>;
 }
