@@ -130,3 +130,5 @@ p{line-height:1.7}
 @media(max-width:440px){.button-row .button{width:100%}.hero-copy h1{font-size:43px}.telehealth-visual{border-radius:20px}.patient-view{min-height:310px}.pipeline-preview{grid-template-columns:1fr}.camera-demo-stats{grid-template-columns:1fr}.consult-context{grid-template-columns:1fr}.footer-main{grid-template-columns:1fr}}
 
 @media(prefers-reduced-motion:reduce){html{scroll-behavior:auto}.button{transition:none}}
+
+.camera-demo:before{content:"PULSEWINDOW  ·  POS SIGNAL CONSOLE"}
